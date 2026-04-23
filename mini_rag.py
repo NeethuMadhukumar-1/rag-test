@@ -16,11 +16,20 @@ It uses:
 """
 
 import os
+from pathlib import Path
 from typing import List, Tuple
 
 import faiss
 import numpy as np
 from openai import OpenAI
+from pypdf import PdfReader
+
+# Your requested Windows folder location.
+# You can also override this with environment variable RAG_DOCS_DIR.
+DEFAULT_DOCS_DIR = r"C:\Users\mad177\OneDrive - CSIRO\Documents\Important Papers"
+SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
+MAX_CHARS_PER_DOC = 3000
+MAX_DOCS = 30
 
 
 def print_section(title: str) -> None:
@@ -33,7 +42,7 @@ def print_section(title: str) -> None:
 def build_sample_documents() -> List[str]:
     """
     Returns a small hardcoded set of sample documents.
-    In real projects, this could come from files, databases, or web pages.
+    We use these only as fallback if the target folder is unavailable.
     """
     return [
         "Python is a high-level programming language known for readability.",
@@ -44,6 +53,51 @@ def build_sample_documents() -> List[str]:
     ]
 
 
+def read_text_file(path: Path) -> str:
+    """Reads plain text files such as .txt and .md."""
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def read_pdf_file(path: Path) -> str:
+    """Extracts text from a PDF file using pypdf."""
+    reader = PdfReader(str(path))
+    pages = [page.extract_text() or "" for page in reader.pages]
+    return "\n".join(pages)
+
+
+def load_documents_from_folder(folder_path: str) -> List[str]:
+    """
+    Loads documents from the given folder.
+    Supports .txt, .md, and .pdf files.
+    """
+    root = Path(folder_path)
+    if not root.exists() or not root.is_dir():
+        print(f"Folder not found: {folder_path}")
+        return []
+
+    files: List[Path] = []
+    for ext in SUPPORTED_EXTENSIONS:
+        files.extend(root.glob(f"*{ext}"))
+    files = sorted(files)[:MAX_DOCS]
+
+    documents: List[str] = []
+    for file_path in files:
+        try:
+            if file_path.suffix.lower() == ".pdf":
+                content = read_pdf_file(file_path)
+            else:
+                content = read_text_file(file_path)
+
+            # Keep each document short for a lightweight beginner demo.
+            content = content.strip()[:MAX_CHARS_PER_DOC]
+            if content:
+                documents.append(f"Source: {file_path.name}\n{content}")
+        except Exception as exc:
+            print(f"Skipping {file_path.name} (read error: {exc})")
+
+    return documents
+
+
 def get_openai_client() -> OpenAI:
     """
     Reads OPENAI_API_KEY from environment and creates an OpenAI client.
@@ -52,8 +106,9 @@ def get_openai_client() -> OpenAI:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "Missing OPENAI_API_KEY. Set it in your environment first, for example:\n"
-            "export OPENAI_API_KEY='your_api_key_here'"
+            "Missing OPENAI_API_KEY. Set it in your environment first.\n"
+            "Linux/macOS example: export OPENAI_API_KEY='your_api_key_here'\n"
+            "Windows PowerShell example: $env:OPENAI_API_KEY='your_api_key_here'"
         )
 
     return OpenAI(api_key=api_key)
@@ -94,7 +149,8 @@ def retrieve_top_k(
     query = np.array(query_vector, dtype="float32").reshape(1, -1)
     faiss.normalize_L2(query)
 
-    scores, indices = index.search(query, top_k)
+    safe_top_k = min(top_k, len(documents))
+    scores, indices = index.search(query, safe_top_k)
     results: List[Tuple[int, float, str]] = []
     for idx, score in zip(indices[0], scores[0]):
         results.append((int(idx), float(score), documents[int(idx)]))
@@ -147,11 +203,22 @@ def main() -> None:
     # STEP 1: Document setup
     # -------------------------------------------------
     print_section("STEP 1: DOCUMENT SETUP")
-    documents = build_sample_documents()
-    for i, doc in enumerate(documents):
-        print(f"Document {i}: {doc}")
+    docs_dir = os.getenv("RAG_DOCS_DIR", DEFAULT_DOCS_DIR)
+    print(f"Trying to load documents from: {docs_dir}")
+    documents = load_documents_from_folder(docs_dir)
 
-    question = "What is RAG and why are embeddings useful?"
+    if not documents:
+        print("No readable files found in folder. Using fallback sample documents.")
+        documents = build_sample_documents()
+
+    print(f"Total documents loaded: {len(documents)}")
+    for i, doc in enumerate(documents[:5]):
+        preview = doc.replace("\n", " ")[:140]
+        print(f"Document {i}: {preview}...")
+    if len(documents) > 5:
+        print("... (showing first 5 documents only)")
+
+    question = "Summarize the most important ideas from these papers."
     print(f"\nQuestion: {question}")
 
     client = get_openai_client()
@@ -172,11 +239,12 @@ def main() -> None:
     # -------------------------------------------------
     print_section("STEP 3: RETRIEVAL")
     index = build_faiss_index(doc_vectors)
-    top_matches = retrieve_top_k(index, documents, query_vector, top_k=2)
+    top_matches = retrieve_top_k(index, documents, query_vector, top_k=3)
     print("Top retrieved documents:")
     for rank, (doc_index, score, doc_text) in enumerate(top_matches, start=1):
+        preview = doc_text.replace("\n", " ")[:180]
         print(f"{rank}. doc_id={doc_index}, similarity={score:.4f}")
-        print(f"   {doc_text}")
+        print(f"   {preview}...")
 
     # -------------------------------------------------
     # STEP 4: Generation
