@@ -21,6 +21,7 @@ from typing import List, Tuple
 
 import faiss
 import numpy as np
+from dotenv import load_dotenv
 from openai import OpenAI
 from pypdf import PdfReader
 
@@ -32,6 +33,14 @@ MAX_CHARS_PER_FILE = 12000
 MAX_DOCS = 30
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 150
+
+
+def load_environment_variables() -> None:
+    """
+    Loads environment variables from a local .env file (if present).
+    This lets beginners keep secrets out of source code.
+    """
+    load_dotenv()
 
 
 def print_section(title: str) -> None:
@@ -129,13 +138,15 @@ def load_documents_from_folder(folder_path: str) -> Tuple[List[str], int]:
 
 def get_openai_client() -> OpenAI:
     """
-    Reads OPENAI_API_KEY from environment and creates an OpenAI client.
+    Reads OPENAI_API_KEY from environment (including .env) and creates an OpenAI client.
     We do NOT hardcode keys in source code.
     """
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "Missing OPENAI_API_KEY. Set it in your environment first.\n"
+            "Missing OPENAI_API_KEY.\n"
+            "Create a .env file with: OPENAI_API_KEY=your_api_key_here\n"
+            "or set it in your environment directly.\n"
             "Linux/macOS example: export OPENAI_API_KEY='your_api_key_here'\n"
             "Windows PowerShell example: $env:OPENAI_API_KEY='your_api_key_here'"
         )
@@ -227,6 +238,7 @@ def generate_answer(
 def main() -> None:
     embedding_model = "text-embedding-3-small"
     chat_model = "gpt-4o-mini"
+    load_environment_variables()
 
     # -------------------------------------------------
     # STEP 1: Document setup
