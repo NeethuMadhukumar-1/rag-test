@@ -28,8 +28,10 @@ from pypdf import PdfReader
 # You can also override this with environment variable RAG_DOCS_DIR.
 DEFAULT_DOCS_DIR = r"C:\Users\mad177\OneDrive - CSIRO\Documents\Important Papers"
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".pdf"}
-MAX_CHARS_PER_DOC = 3000
+MAX_CHARS_PER_FILE = 12000
 MAX_DOCS = 30
+CHUNK_SIZE = 900
+CHUNK_OVERLAP = 150
 
 
 def print_section(title: str) -> None:
@@ -65,15 +67,36 @@ def read_pdf_file(path: Path) -> str:
     return "\n".join(pages)
 
 
-def load_documents_from_folder(folder_path: str) -> List[str]:
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
+    """
+    Splits long text into small overlapping chunks.
+    Overlap helps preserve context between neighboring chunks.
+    """
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        return []
+
+    chunks: List[str] = []
+    step = max(1, chunk_size - overlap)
+    start = 0
+    while start < len(cleaned):
+        end = start + chunk_size
+        chunk = cleaned[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start += step
+    return chunks
+
+
+def load_documents_from_folder(folder_path: str) -> Tuple[List[str], int]:
     """
     Loads documents from the given folder.
-    Supports .txt, .md, and .pdf files.
+    Supports .txt, .md, and .pdf files, then chunks each long document.
     """
     root = Path(folder_path)
     if not root.exists() or not root.is_dir():
         print(f"Folder not found: {folder_path}")
-        return []
+        return [], 0
 
     files: List[Path] = []
     for ext in SUPPORTED_EXTENSIONS:
@@ -81,6 +104,7 @@ def load_documents_from_folder(folder_path: str) -> List[str]:
     files = sorted(files)[:MAX_DOCS]
 
     documents: List[str] = []
+    loaded_file_count = 0
     for file_path in files:
         try:
             if file_path.suffix.lower() == ".pdf":
@@ -88,14 +112,19 @@ def load_documents_from_folder(folder_path: str) -> List[str]:
             else:
                 content = read_text_file(file_path)
 
-            # Keep each document short for a lightweight beginner demo.
-            content = content.strip()[:MAX_CHARS_PER_DOC]
+            # Cap file size to keep this example lightweight.
+            content = content.strip()[:MAX_CHARS_PER_FILE]
             if content:
-                documents.append(f"Source: {file_path.name}\n{content}")
+                loaded_file_count += 1
+                chunks = chunk_text(content)
+                for chunk_idx, chunk in enumerate(chunks, start=1):
+                    documents.append(
+                        f"Source: {file_path.name} | Chunk {chunk_idx}/{len(chunks)}\n{chunk}"
+                    )
         except Exception as exc:
             print(f"Skipping {file_path.name} (read error: {exc})")
 
-    return documents
+    return documents, loaded_file_count
 
 
 def get_openai_client() -> OpenAI:
@@ -205,13 +234,15 @@ def main() -> None:
     print_section("STEP 1: DOCUMENT SETUP")
     docs_dir = os.getenv("RAG_DOCS_DIR", DEFAULT_DOCS_DIR)
     print(f"Trying to load documents from: {docs_dir}")
-    documents = load_documents_from_folder(docs_dir)
+    documents, file_count = load_documents_from_folder(docs_dir)
 
     if not documents:
         print("No readable files found in folder. Using fallback sample documents.")
         documents = build_sample_documents()
+        file_count = len(documents)
 
-    print(f"Total documents loaded: {len(documents)}")
+    print(f"Files loaded: {file_count}")
+    print(f"Total chunks/documents for embedding: {len(documents)}")
     for i, doc in enumerate(documents[:5]):
         preview = doc.replace("\n", " ")[:140]
         print(f"Document {i}: {preview}...")
