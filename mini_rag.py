@@ -202,6 +202,7 @@ def generate_answer(
     question: str,
     retrieved_docs: List[Tuple[int, float, str]],
     model: str,
+    chat_history: List[Tuple[str, str]],
 ) -> str:
     """
     Generates a final answer with chat completion, grounded in retrieved context.
@@ -217,8 +218,13 @@ def generate_answer(
         "You are a helpful assistant. Use only the provided context to answer. "
         "If the context is insufficient, say what is missing."
     )
+    recent_history = chat_history[-4:]
+    history_text = "\n".join(
+        [f"User: {q}\nAssistant: {a}" for q, a in recent_history]
+    )
     user_prompt = (
-        f"Question: {question}\n\n"
+        f"Conversation so far (most recent turns):\n{history_text}\n\n"
+        f"Current question: {question}\n\n"
         f"Retrieved context:\n{context}\n\n"
         "Answer clearly for a beginner."
     )
@@ -233,6 +239,71 @@ def generate_answer(
     )
 
     return response.choices[0].message.content or ""
+
+
+def run_retrieval_for_question(
+    client: OpenAI,
+    question: str,
+    embedding_model: str,
+    index: faiss.Index,
+    documents: List[str],
+) -> List[Tuple[int, float, str]]:
+    """Embeds the question and returns top matching document chunks."""
+    query_vector = embed_texts(client, [question], embedding_model)[0]
+    print(f"Query embedding length: {query_vector.shape[0]}")
+    top_matches = retrieve_top_k(index, documents, query_vector, top_k=3)
+    print("Top retrieved chunks:")
+    for rank, (doc_index, score, doc_text) in enumerate(top_matches, start=1):
+        preview = doc_text.replace("\n", " ")[:180]
+        print(f"{rank}. doc_id={doc_index}, similarity={score:.4f}")
+        print(f"   {preview}...")
+    return top_matches
+
+
+def chat_loop(
+    client: OpenAI,
+    embedding_model: str,
+    chat_model: str,
+    index: faiss.Index,
+    documents: List[str],
+) -> None:
+    """
+    Runs an interactive chat loop.
+    Each user question is answered using retrieval from your indexed documents.
+    """
+    print_section("RAG CHAT MODE")
+    print("Ask questions about your documents.")
+    print("Type 'exit' or 'quit' to stop.\n")
+
+    history: List[Tuple[str, str]] = []
+    while True:
+        question = input("You: ").strip()
+        if not question:
+            continue
+        if question.lower() in {"exit", "quit"}:
+            print("Goodbye.")
+            break
+
+        print_section("STEP 3: RETRIEVAL")
+        top_matches = run_retrieval_for_question(
+            client=client,
+            question=question,
+            embedding_model=embedding_model,
+            index=index,
+            documents=documents,
+        )
+
+        print_section("STEP 4: GENERATION")
+        print(f"Generating answer with model: {chat_model}")
+        answer = generate_answer(
+            client=client,
+            question=question,
+            retrieved_docs=top_matches,
+            model=chat_model,
+            chat_history=history,
+        )
+        print(f"\nAssistant: {answer}\n")
+        history.append((question, answer))
 
 
 def main() -> None:
@@ -261,9 +332,6 @@ def main() -> None:
     if len(documents) > 5:
         print("... (showing first 5 documents only)")
 
-    question = "Summarize the most important ideas from these papers."
-    print(f"\nQuestion: {question}")
-
     client = get_openai_client()
 
     # -------------------------------------------------
@@ -274,29 +342,19 @@ def main() -> None:
     doc_vectors = embed_texts(client, documents, embedding_model)
     print(f"Document embeddings shape: {doc_vectors.shape}")
 
-    query_vector = embed_texts(client, [question], embedding_model)[0]
-    print(f"Query embedding length: {query_vector.shape[0]}")
-
-    # -------------------------------------------------
-    # STEP 3: Retrieval
-    # -------------------------------------------------
-    print_section("STEP 3: RETRIEVAL")
     index = build_faiss_index(doc_vectors)
-    top_matches = retrieve_top_k(index, documents, query_vector, top_k=3)
-    print("Top retrieved documents:")
-    for rank, (doc_index, score, doc_text) in enumerate(top_matches, start=1):
-        preview = doc_text.replace("\n", " ")[:180]
-        print(f"{rank}. doc_id={doc_index}, similarity={score:.4f}")
-        print(f"   {preview}...")
+    print("Vector index is ready.\n")
 
     # -------------------------------------------------
-    # STEP 4: Generation
+    # STEP 3 + STEP 4 (repeated for each chat question)
     # -------------------------------------------------
-    print_section("STEP 4: GENERATION")
-    print(f"Generating final answer with model: {chat_model}")
-    answer = generate_answer(client, question, top_matches, chat_model)
-    print("\nFinal Answer:")
-    print(answer)
+    chat_loop(
+        client=client,
+        embedding_model=embedding_model,
+        chat_model=chat_model,
+        index=index,
+        documents=documents,
+    )
 
 
 if __name__ == "__main__":
